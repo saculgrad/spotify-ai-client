@@ -1,0 +1,6 @@
+spotipy
+rapidfuzz
+unidecode
+pytest
+anthropic
+flask

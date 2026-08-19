@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Review tracks{% endblock %}
+{% block content %}
+  <h1>Review tracks</h1>
+  <p>Look over the suggestions below. Approve the ones you want, remove the ones you
+     don't, or flag one for a staff member to swap out later. Nothing gets sent to
+     Spotify until you click "Write approved tracks to Spotify" at the bottom.</p>
+  <p class="summary">
+    {{ summary.approved }} approved &middot; {{ summary.pending }} still needs a decision &middot;
+    {{ summary.removed }} removed &middot; {{ summary.regenerate_requested }} flagged for regeneration
+    &middot; {{ summary.total }} total
+  </p>
+
+  {% if summary.pending %}
+    <form method="post" action="{{ url_for('approve_all', session_id=session_id) }}">
+      <button type="submit" class="approve-btn">Approve all {{ summary.pending }} remaining</button>
+    </form>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('generate_more', session_id=session_id) }}" style="margin-top:1.5rem;">
+    <h2 style="margin-top:0;">Generate more</h2>
+    <p class="note">
+      Not enough yet, or want a different angle? Describe what else you want — the AI
+      will see what you've already approved (to match that style) and what you've
+      removed or flagged (to avoid suggesting it again), and add new tracks below for
+      you to review, without touching anything you've already decided on.
+    </p>
+    <label for="additional_prompt">What else do you want?</label>
+    <input type="text" id="additional_prompt" name="additional_prompt"
+      placeholder="a few more upbeat ones, or: nothing from the 2000s this time">
+
+    <label for="more_track_count">How many more?</label>
+    <input type="number" id="more_track_count" name="track_count" value="10" min="1" max="100">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="more_allow_explicit" name="allow_explicit" checked>
+      <label for="more_allow_explicit">Allow explicit tracks</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="more_avoid_obvious" name="avoid_obvious">
+      <label for="more_avoid_obvious">Prefer lesser-known songs</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="more_ignore_recently_used" name="ignore_recently_used" checked>
+      <label for="more_ignore_recently_used">Allow recently-used songs</label>
+    </div>
+
+    <button type="submit">Generate more suggestions</button>
+  </form>
+
+  <table>
+    <thead>
+      <tr><th>Track</th><th>Artist</th><th>Status</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+        <tr id="track-{{ item.result.track_id }}">
+          <td>{{ item.result.track_name }}</td>
+          <td>{{ item.result.track_artists }}</td>
+          <td>
+            <span class="status-{{ item.status }}">{{ item.status.replace('_', ' ') }}</span>
+            {% if item.note %}<div class="note">"{{ item.note }}"</div>{% endif %}
+          </td>
+          <td class="row-actions">
+            <form method="post" action="{{ url_for('approve_track', session_id=session_id, track_id=item.result.track_id) }}">
+              <button type="submit" class="approve-btn">Approve</button>
+            </form>
+            <form method="post" action="{{ url_for('remove_track', session_id=session_id, track_id=item.result.track_id) }}">
+              <input type="text" name="reason" placeholder="why? (optional)">
+              <button type="submit" class="remove-btn">Remove</button>
+            </form>
+            <form method="post" action="{{ url_for('regenerate_track', session_id=session_id, track_id=item.result.track_id) }}">
+              <input type="text" name="note" placeholder="what instead? (optional)">
+              <button type="submit" class="regenerate-btn">Flag for regeneration</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note">
+    "Flag for regeneration" doesn't automatically replace the track — it just marks it
+    so a staff member knows to swap it out for something else later.
+  </p>
+
+  <form method="post" action="{{ url_for('finalize', session_id=session_id) }}">
+    <h2 style="margin-top:2rem;">Write to Spotify</h2>
+    <p class="note">Only the tracks marked "approved" above will be included.</p>
+    <label for="playlist_name">Create a new playlist named:</label>
+    <input type="text" id="playlist_name" name="playlist_name" placeholder="Sunday Brunch"
+      value="{{ target_playlist_name }}">
+
+    <label for="playlist_id">— or — add to an existing playlist ID:</label>
+    <div class="help-text">
+      Already set from what you picked on the previous page — change it here if you'd
+      rather send this batch somewhere else. Leave blank to create a new playlist.
+    </div>
+    <input type="text" id="playlist_id" name="playlist_id" placeholder="leave blank to create new"
+      value="{{ target_playlist_id }}">
+
+    <button type="submit">Write approved tracks to Spotify</button>
+  </form>
+
+  <form method="post" action="{{ url_for('cancel_review', session_id=session_id) }}" style="margin-top:1rem;">
+    <p class="note">Or, cancel this review — nothing above will be written to Spotify, and this
+      review will be discarded for good.</p>
+    <button type="submit" class="remove-btn">Cancel and go back home</button>
+  </form>
+{% endblock %}

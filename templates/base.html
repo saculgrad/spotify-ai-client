@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Playlist Tool{% endblock %}</title>
+  <style>
+    body { font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 760px;
+           margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.4rem; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    .help-text { font-weight: normal; color: #666; font-size: 0.85rem; margin-top: 0.15rem; }
+    input[type=text], input[type=number], select, textarea {
+      width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box;
+      font-size: 1rem; border: 1px solid #bbb; border-radius: 4px;
+    }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; }
+    .checkbox-row label { margin-top: 0; font-weight: normal; }
+    button { margin-top: 1.5rem; padding: 0.6rem 1.3rem; cursor: pointer; font-size: 1rem;
+             border: none; border-radius: 4px; background: #1a7f37; color: white; }
+    button:hover { background: #156029; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+    .status-approved { color: #1a7f37; font-weight: 600; }
+    .status-removed { color: #999; text-decoration: line-through; }
+    .status-regenerate_requested { color: #b35900; font-weight: 600; }
+    .status-pending { color: #444; }
+    .row-actions form { display: block; margin: 0 0 0.35rem 0; }
+    .row-actions input[type=text] {
+      width: auto; display: inline-block; padding: 0.25rem 0.4rem; margin: 0 0.3rem 0 0;
+      font-size: 0.8rem; vertical-align: middle;
+    }
+    .row-actions button {
+      margin-top: 0; padding: 0.25rem 0.7rem; font-size: 0.8rem; vertical-align: middle;
+    }
+    .row-actions .approve-btn { background: #1a7f37; }
+    .row-actions .remove-btn { background: #b42318; }
+    .row-actions .regenerate-btn { background: #b35900; }
+    .summary { margin-top: 1rem; color: #555; }
+    .note { color: #777; font-size: 0.85rem; margin-top: 0.15rem; }
+    .flash { padding: 0.7rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.95rem; }
+    .flash-success { background: #e6f4ea; color: #1a7f37; border: 1px solid #b7e1c1; }
+    .flash-error { background: #fdecea; color: #b42318; border: 1px solid #f3b8b0; }
+  </style>
+</head>
+<body>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="flash flash-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</body>
+</html>

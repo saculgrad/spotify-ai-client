@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Generate a playlist{% endblock %}
+{% block content %}
+  <h1>Generate a playlist</h1>
+  <p>Describe what you want in plain language — the AI will suggest songs, and
+     you'll get a chance to approve or remove each one before anything is saved.</p>
+  <form method="post" action="{{ url_for('generate') }}">
+    <label for="vibe_prompt">Describe the vibe</label>
+    <textarea id="vibe_prompt" name="vibe_prompt" rows="3" required
+      placeholder="warm 60s-70s soul for Sunday brunch, nothing too loud"></textarea>
+
+    <label for="track_count">How many songs?</label>
+    <input type="number" id="track_count" name="track_count" value="20" min="1" max="100">
+
+    <label for="mode">Time of day (optional)</label>
+    <div class="help-text">Nudges the style — brunch skews warm and easygoing, late leans moodier.</div>
+    <select id="mode" name="mode">
+      <option value="">— no preference —</option>
+      {% for m in modes %}
+        <option value="{{ m }}" {{ "selected" if m == current_mode else "" }}>{{ m|capitalize }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="max_per_artist">Limit songs per artist (optional)</label>
+    <div class="help-text">e.g. enter 2 so the same artist doesn't show up more than twice.</div>
+    <input type="number" id="max_per_artist" name="max_per_artist" min="1" placeholder="no limit">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="allow_explicit" name="allow_explicit" checked>
+      <label for="allow_explicit">Allow explicit tracks</label>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="avoid_obvious" name="avoid_obvious">
+      <label for="avoid_obvious">Prefer lesser-known songs</label>
+    </div>
+    <div class="help-text">
+      Nudges the AI toward deeper cuts and lesser-known artists instead of the
+      most obvious, overplayed picks for the vibe.
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="ignore_recently_used" name="ignore_recently_used" checked>
+      <label for="ignore_recently_used">Allow recently-used songs</label>
+    </div>
+    <div class="help-text">
+      Checked by default. Uncheck this if you want songs added in the last 30
+      days excluded, so playlists don't repeat themselves over time.
+    </div>
+
+    <label for="playlist_id">Grow an existing playlist (optional)</label>
+    <div class="help-text">
+      Picking one here does three things: the new songs get added to it,
+      songs already on it won't be suggested again, and — since it already
+      "works" — the AI looks at what's already on it to match that same
+      style. This is the easiest way to make a playlist you already like
+      way longer. Leave it on "create a new playlist" to start fresh instead.
+    </div>
+    <select id="playlist_id" name="playlist_id">
+      <option value="">— create a new playlist instead —</option>
+      {% for p in playlists %}
+        <option value="{{ p.id }}">{{ p.name }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="playlist_name">New playlist name (used only if not adding to an existing one)</label>
+    <input type="text" id="playlist_name" name="playlist_name" placeholder="Sunday Brunch">
+
+    <button type="submit">Generate suggestions</button>
+  </form>
+{% endblock %}
