@@ -51,6 +51,7 @@ def test_append_then_read_round_trips_all_fields(tmp_path):
         resolver_dropped_summary={"no_search_results": 4, "artist_mismatch": 2},
         avoid_obvious=True,
         ignore_recently_used=True,
+        sequence_for_flow=True,
     )
 
     log.append(entry)
@@ -68,6 +69,7 @@ def test_append_then_read_round_trips_all_fields(tmp_path):
     assert read_back["resolver_dropped_summary"] == {"no_search_results": 4, "artist_mismatch": 2}
     assert read_back["avoid_obvious"] is True
     assert read_back["ignore_recently_used"] is True
+    assert read_back["sequence_for_flow"] is True
     assert "timestamp" in read_back
 
 
@@ -81,6 +83,7 @@ def test_defaults_for_optional_fields(tmp_path):
     assert entry["resolver_dropped_summary"] == {}
     assert entry["avoid_obvious"] is False
     assert entry["ignore_recently_used"] is False
+    assert entry["sequence_for_flow"] is False
 
 
 def test_timestamp_auto_populated_and_unique_per_entry(tmp_path):

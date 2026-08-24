@@ -59,6 +59,7 @@ class RunLogEntry:
     # resolver_dropped_summary's default_factory pattern above).
     avoid_obvious: bool = False
     ignore_recently_used: bool = False
+    sequence_for_flow: bool = False
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 

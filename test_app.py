@@ -1049,6 +1049,19 @@ def test_generate_more_avoid_obvious_reaches_the_second_llm_call(tmp_path):
     assert "avoid the most obvious" in second_call_prompt.lower()
 
 
+def test_generate_more_sequence_for_flow_reaches_the_second_llm_call(tmp_path):
+    anthropic = SequencedFakeAnthropicClient([THREE_TRACK_CANDIDATES, [("New Song", "New Artist")]])
+    flask_app, _ = make_app(tmp_path, anthropic=anthropic, search_catalog=FOUR_TRACK_CATALOG)
+    client = flask_app.test_client()
+    session_id = _generate_three_track_session(client)
+
+    client.post(f"/review/{session_id}/generate_more",
+                data={"additional_prompt": "more", "track_count": "1", "sequence_for_flow": "on"})
+
+    second_call_prompt = anthropic.messages.calls[1]["messages"][0]["content"]
+    assert "actual listening sequence" in second_call_prompt
+
+
 def test_generate_more_ignore_recently_used_bypasses_the_exclusion(tmp_path):
     recent_log = RecentlyUsedLog(tmp_path / "recent.json")
     recent_log.record(["t4"])
@@ -1159,6 +1172,7 @@ def test_review_page_renders_generate_more_form(tmp_path):
 
     assert f'/review/{session_id}/generate_more'.encode() in resp.data
     assert b'name="additional_prompt"' in resp.data
+    assert b'name="sequence_for_flow"' in resp.data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1211,6 +1225,59 @@ def test_generate_without_prefer_less_popular_omits_the_avoid_obvious_hint(tmp_p
 
     sent_prompt = anthropic.messages.calls[0]["messages"][0]["content"]
     assert "avoid the most obvious" not in sent_prompt.lower()
+
+
+def test_generate_sequence_for_flow_checkbox_reaches_the_llm_prompt(tmp_path):
+    """"Order for a natural flow" — opt-in, live A/B validated 2026-08-24
+    (see generator.GenerationRequest's docstring comment). Order survives
+    unmodified all the way through resolve_tracklist()'s order-preserving
+    thread pool and curation's order-preserving filters, so whatever
+    sequence the model picks here is what actually reaches the final
+    playlist."""
+    anthropic = FakeAnthropicClient(TWO_TRACK_CANDIDATES)
+    flask_app, _ = make_app(tmp_path, anthropic=anthropic, search_catalog=TWO_TRACK_CATALOG)
+    client = flask_app.test_client()
+
+    client.post("/generate", data={
+        "vibe_prompt": "soul brunch", "track_count": "2", "sequence_for_flow": "on",
+    })
+
+    sent_prompt = anthropic.messages.calls[0]["messages"][0]["content"]
+    assert "actual listening sequence" in sent_prompt
+
+
+def test_generate_without_sequence_for_flow_omits_the_hint_by_default(tmp_path):
+    anthropic = FakeAnthropicClient(TWO_TRACK_CANDIDATES)
+    flask_app, _ = make_app(tmp_path, anthropic=anthropic, search_catalog=TWO_TRACK_CATALOG)
+    client = flask_app.test_client()
+
+    client.post("/generate", data={"vibe_prompt": "soul brunch", "track_count": "2"})
+
+    sent_prompt = anthropic.messages.calls[0]["messages"][0]["content"]
+    assert "actual listening sequence" not in sent_prompt
+
+
+def test_generate_run_log_records_sequence_for_flow_state(tmp_path):
+    anthropic = FakeAnthropicClient(TWO_TRACK_CANDIDATES)
+    flask_app, _ = make_app(tmp_path, anthropic=anthropic, search_catalog=TWO_TRACK_CATALOG)
+    client = flask_app.test_client()
+
+    client.post("/generate", data={
+        "vibe_prompt": "soul brunch", "track_count": "2", "sequence_for_flow": "on",
+    })
+
+    entries = flask_app.config["RUN_LOG"].read_all()
+    assert entries[0]["sequence_for_flow"] is True
+
+
+def test_index_renders_sequence_for_flow_checkbox_unchecked_by_default(tmp_path):
+    flask_app, _ = make_app(tmp_path)
+    client = flask_app.test_client()
+
+    resp = client.get("/")
+
+    assert b'id="sequence_for_flow" name="sequence_for_flow" checked' not in resp.data
+    assert b'name="sequence_for_flow"' in resp.data
 
 
 def test_generate_uses_the_target_playlist_itself_as_a_seed_for_grounding(tmp_path):

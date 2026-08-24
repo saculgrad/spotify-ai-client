@@ -88,6 +88,21 @@ class GenerationRequest:
     language: Optional[str] = None
     explicit_ok: bool = True
     avoid_obvious: bool = False
+    # Ask the model to order candidates as an actual listening sequence
+    # rather than just a set of individually-good picks. Live A/B tested
+    # 2026-08-24 (two real vibes, both against the real Claude API): the
+    # baseline (no instruction) scattered mood/energy fairly randomly —
+    # e.g. a "day-into-night, gets more energetic" request had its actual
+    # energy peak land in the MIDDLE of the list, trailing off by the end.
+    # With this instruction on, the same prompt built a clean, real energy
+    # arc ending on an anthemic peak, matching what was asked for. Order is
+    # preserved end-to-end through resolve_tracklist()'s order-preserving
+    # thread pool and curation's order-preserving filters, so whatever
+    # sequence the model picks here is what actually reaches the final
+    # playlist — this isn't cosmetic. Opt-in (defaults off) since it's only
+    # been validated on two live prompts so far, not battle-tested broadly
+    # the way avoid_obvious now has been.
+    sequence_for_flow: bool = False
     artist_diversity_cap: Optional[int] = None
     house_taste: list[str] = field(default_factory=list)   # "Artist - Title" lines
     blocklist: list[str] = field(default_factory=list)      # artist and/or track names
@@ -188,6 +203,17 @@ def _build_user_prompt(request: GenerationRequest, overgenerated_count: int) -> 
             "tracks a well-versed music fan would recognize but a casual "
             "listener probably would not, not just each artist's single "
             "biggest hit."
+        )
+    if request.sequence_for_flow:
+        lines.append(
+            "Order your candidate list as an actual listening sequence, not "
+            "just a set of individually-good picks — the order you list them "
+            "in is the order they will play in. Build or vary the energy "
+            "naturally across the set rather than placing very different "
+            "energy levels back to back without reason, avoid jarring "
+            "era/genre whiplash between consecutive tracks unless the vibe "
+            "specifically calls for eclecticism, and end on a track that "
+            "feels like a good closer if the vibe suggests one."
         )
     if request.artist_diversity_cap:
         lines.append(

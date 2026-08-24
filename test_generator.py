@@ -175,6 +175,34 @@ def test_previously_rejected_line_omitted_when_empty():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# sequence_for_flow — opt-in, live A/B validated 2026-08-24 (see
+# GenerationRequest's docstring comment for the two-vibe diagnostic result)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_sequence_for_flow_reaches_the_prompt_when_requested():
+    text = payload_text([cand("Song", "Artist")])
+    client = FakeClient([FakeResponse(text=text)])
+    req = GenerationRequest(vibe_prompt="anything", track_count=1, sequence_for_flow=True)
+
+    generate_candidates(client, req)
+
+    sent_prompt = client.messages.calls[0]["messages"][0]["content"]
+    assert "actual listening sequence" in sent_prompt
+    assert "good closer" in sent_prompt
+
+
+def test_sequence_for_flow_omitted_by_default():
+    text = payload_text([cand("Song", "Artist")])
+    client = FakeClient([FakeResponse(text=text)])
+    req = GenerationRequest(vibe_prompt="anything", track_count=1)   # sequence_for_flow defaults False
+
+    generate_candidates(client, req)
+
+    sent_prompt = client.messages.calls[0]["messages"][0]["content"]
+    assert "actual listening sequence" not in sent_prompt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Blocklist — hard filter in code, not trusted to the prompt alone
 # ─────────────────────────────────────────────────────────────────────────────
 

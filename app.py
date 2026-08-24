@@ -158,6 +158,7 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
         allow_explicit = request.form.get("allow_explicit") == "on"
         prefer_less_popular = request.form.get("avoid_obvious") == "on"
         ignore_recently_used = request.form.get("ignore_recently_used") == "on"
+        sequence_for_flow = request.form.get("sequence_for_flow") == "on"
         raw_cap = request.form.get("max_per_artist") or None
         max_per_artist = None
         if raw_cap:
@@ -223,7 +224,7 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
 
         gen_request = build_generation_request(
             vibe_prompt, track_count, mode=mode, explicit_ok=allow_explicit,
-            avoid_obvious=prefer_less_popular,
+            avoid_obvious=prefer_less_popular, sequence_for_flow=sequence_for_flow,
             house_taste=house_taste, blocklist=venue_config.blocklist,
         )
 
@@ -259,6 +260,7 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
             resolver_dropped_summary=result.resolver_dropped_by_reason,
             avoid_obvious=prefer_less_popular,
             ignore_recently_used=ignore_recently_used,
+            sequence_for_flow=sequence_for_flow,
         ))
 
         dropped = result.generated_count - len(result.kept)
@@ -366,6 +368,7 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
         allow_explicit = request.form.get("allow_explicit") == "on"
         prefer_less_popular = request.form.get("avoid_obvious") == "on"
         ignore_recently_used = request.form.get("ignore_recently_used") == "on"
+        sequence_for_flow = request.form.get("sequence_for_flow") == "on"
 
         venue_config = app.config["VENUE_CONFIG"]
         target = app.config["SESSION_STORE"].get_target(session_id) or {}
@@ -418,8 +421,9 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
 
         gen_request = build_generation_request(
             additional_prompt, track_count, explicit_ok=allow_explicit,
-            avoid_obvious=prefer_less_popular, house_taste=house_taste,
-            blocklist=venue_config.blocklist, previously_rejected=rejected_lines,
+            avoid_obvious=prefer_less_popular, sequence_for_flow=sequence_for_flow,
+            house_taste=house_taste, blocklist=venue_config.blocklist,
+            previously_rejected=rejected_lines,
         )
 
         try:
@@ -452,6 +456,7 @@ def create_app(anthropic_client=None, spotify_client=None, session_store=None, r
             resolver_dropped_summary=result.resolver_dropped_by_reason,
             avoid_obvious=prefer_less_popular,
             ignore_recently_used=ignore_recently_used,
+            sequence_for_flow=sequence_for_flow,
         ))
 
         flash(f"Added {len(result.kept)} more track{'s' if len(result.kept) != 1 else ''} to review.",

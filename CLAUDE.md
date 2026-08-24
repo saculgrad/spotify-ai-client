@@ -260,17 +260,68 @@ API and returns `{title, artist}` candidates ready for `resolver.py`.
   review session's state and thrown away with it. Capped at 100 lines
   (same pattern as `house_taste`'s 200-line cap) so a very long iterative
   session doesn't grow the prompt unboundedly.
+- **`sequence_for_flow` field added (2026-08-24) — opt-in, live A/B
+  validated before shipping.** The owner's idea was a music-specialized
+  model instead of prompt engineering — investigated and ruled out as
+  impractical (the obvious candidate, Spotify's own recommendation/
+  audio-features engine, is exactly what's deprecated for this app's tier,
+  which is *why* this project is built the way it is; no comparably-capable
+  third-party "music LLM" exists to swap in). The more promising, actually
+  testable gap: nothing in any prompt asked the model to think about
+  **order** — every existing instruction (house-taste, `avoid_obvious`,
+  blocklist) is about *which* songs to pick, never about how they'd feel
+  *in sequence*. Live A/B tested against the real Claude API, two vibes,
+  identical prompt otherwise:
+  - *"dinner service, building gently"* — baseline scattered mood (Sinatra
+    swing into Bon Iver indie-folk melancholy back into soul, a ballad
+    dropped right after a dramatic build, no real ending); the sequenced
+    version clustered by mood, built a real arc through the middle, and
+    closed on "What a Wonderful World" — legibly a deliberate "end the
+    night warmly" choice, not just track #12 of 12.
+  - *"day-into-night rooftop, gets more energetic"* — baseline's actual
+    energy PEAK landed in the *middle* of the list (Daft Punk/Dua Lipa),
+    trailing off into Hozier/Tame Impala by the end — backwards from what
+    was asked. The sequenced version built cleanly from a chill open
+    through a synth/pop middle into a real EDM-anthem peak at the very
+    end (One More Time, Levels, Titanium, Don't You Worry Child, Wake Me
+    Up) — exactly the requested arc.
+  - **Mechanism confirmed, not assumed:** order survives unmodified
+    end-to-end — `resolve_tracklist()`'s thread pool uses
+    `ThreadPoolExecutor.map()` (input-order-preserving, the exact property
+    the 2026-08-13 parallelization work was built around), and every
+    `curation.py` filter only drops items, never reorders survivors. So
+    whatever sequence the model picks in `generator.py` is what actually
+    reaches the review table and the final playlist — this isn't cosmetic.
+  - **Caveat, stated plainly:** the "energy/mood coherence" judgment above
+    is qualitative — my own read of the songs, not measured data. Spotify's
+    audio-features endpoint (energy/valence/tempo) is gone for this app's
+    tier, so there's no automatable way to score this inside the app
+    itself; it can't be turned into an objective test the way drop-rate
+    counts can.
+  - Owner asked for this shipped as **opt-in** (not unconditional, despite
+    the clean result) — defaults off. Only validated on two live prompts
+    so far, not battle-tested the way `avoid_obvious` now has been across
+    many real runs, so opt-in is also the more conservative choice until
+    it's seen more real use.
+  - **Known follow-up limitation, not addressed here:** for "grow an
+    existing playlist" or "generate more," the new tracks are sequenced
+    *among themselves* but the model has no idea what the target
+    playlist's last track currently is, so the new block won't necessarily
+    flow *from* where the existing playlist left off. Would need feeding
+    the target's tail end into the prompt to fix — not done, flagged for
+    later.
 - **Tested (mock Anthropic client, no API key needed):** happy path,
   correct over-generation count sent in the prompt, blocklist-by-artist,
   blocklist-by-track-title, malformed-row dropping, retry-then-succeed on
   refusal/truncation/malformed-JSON, raising after all retries are
-  exhausted, the two `avoid_obvious` wording tests above, and
-  `previously_rejected` reaching the prompt (present when populated,
-  omitted when empty). 13/13 pass.
+  exhausted, the two `avoid_obvious` wording tests, `previously_rejected`
+  reaching the prompt (present when populated, omitted when empty), and
+  `sequence_for_flow` reaching the prompt when requested / omitted by
+  default. 15/15 pass.
 - **Live-verified against the real Claude API** multiple times since this
   file first said "not tested yet" — the initial live run (see "Live API
-  verification" below) and the `avoid_obvious` A/B diagnostic above both
-  used the real API, not mocks.
+  verification" below), the `avoid_obvious` A/B diagnostic, and the
+  `sequence_for_flow` A/B diagnostic above all used the real API, not mocks.
 
 ## What's built: `resolver.py`
 The track resolver — the quality-critical piece. Given LLM candidates
@@ -555,11 +606,17 @@ final track ids, and the curation drop-reason summary; `RunLog.append()`/
   the checkbox was even checked, since the log had no way to tell. Both
   `False` by default, same pattern as `dropped_summary`/
   `resolver_dropped_summary` above.
+- **`sequence_for_flow` field added (2026-08-24)** — same reasoning as the
+  two fields above, applied proactively this time rather than after a
+  support question: whether the "Order for a natural flow" checkbox (see
+  `generator.py`'s and `app.py`'s entries) was on for a given run. `False`
+  by default.
 - **Tested (fully offline, `tmp_path`):** round-trip of every field
-  (including both new ones), defaults-when-omitted, append order preserved
-  across multiple `RunLog` instances pointed at the same file,
-  corrupted-line resilience (valid lines on either side still read back),
-  blank-line handling, missing file, auto-created parent dirs. 10/10 pass.
+  (including all three toggle fields above), defaults-when-omitted, append
+  order preserved across multiple `RunLog` instances pointed at the same
+  file, corrupted-line resilience (valid lines on either side still read
+  back), blank-line handling, missing file, auto-created parent dirs.
+  10/10 pass.
 
 ## What's built: `venue_config.py`
 Local JSON config (`venue_config.json`, gitignored — venue-specific, not
@@ -985,6 +1042,21 @@ whole request/response cycle verifiable without live credentials.
   fix that's purely about the user-facing label text.
   - **Tested:** both pages render "Allow recently-used songs" and do NOT
     render the old "Ignore recently-used songs" text. 1 new test.
+- **"Order for a natural flow" checkbox (2026-08-24)** — wires
+  `generator.py`'s new `sequence_for_flow` (see its entry for the live A/B
+  evidence) into both `index.html`'s main form and `review.html`'s
+  "generate more" form, exactly parallel to how `avoid_obvious` is wired:
+  read via `request.form.get("sequence_for_flow") == "on"` in both
+  `generate()` and `generate_more()`, passed into
+  `build_generation_request()`, and recorded on the `RunLogEntry` the same
+  way `avoid_obvious`/`ignore_recently_used` already are. **Defaults
+  unchecked** — the owner's explicit call, opt-in rather than
+  unconditional despite the clean diagnostic result, since it's only been
+  validated on two live prompts so far.
+  - **Tested:** the instruction reaching the prompt on both `/generate` and
+    `/review/<id>/generate_more` when checked, omitted by default, the
+    toggle state recorded on the run-log entry, and the checkbox rendering
+    unchecked on `index.html`. 5 new tests.
 - **Tested (Flask's test client, real `tmp_path`-backed `SessionStore` +
   `RunLog` + `RecentlyUsedLog`, fake combined Anthropic/Spotify clients —
   no network):** every route including friendly-redirect validation
@@ -1173,10 +1245,10 @@ account — there's no more "buildable without credentials" backlog.
   developer watching the server log can see these failures next time,
   without changing the user-facing behavior (still degrades gracefully,
   never blocks the page).
-- All ten modules pass their full mock/unit test suites (39 resolver + 13
+- All ten modules pass their full mock/unit test suites (39 resolver + 15
   generator + 41 curation + 40 review + 39 spotify_client + 24 modes + 10
-  logging_utils + 6 venue_config + 8 pipeline + 24 session_store + 104 app
-  = **349 tests**, up from 269 after ten post-live-verification passes:
+  logging_utils + 6 venue_config + 8 pipeline + 24 session_store + 110 app
+  = **356 tests**, up from 269 after eleven post-live-verification passes:
   `resolve_tracklist()` parallelized (+5), the review-page scroll-anchor
   fix (+4), the cancel-review feature (+8), the small-bug/papercut audit
   fixes (+16), the recently-used-bypass/drop-reason-logging/avoid_obvious
@@ -1187,8 +1259,10 @@ account — there's no more "buildable without credentials" backlog.
   actually checked per run (+2 app), the "generate more" mid-review
   follow-up feature (+31: 8 review, 2 generator, 21 app — including a
   coverage-verification pass that found and closed 2 real gaps, one of
-  them pre-existing in the original `/generate` route), and relabeling the
-  "Allow recently-used songs" checkbox for clarity (+1 app) — see their
+  them pre-existing in the original `/generate` route), relabeling the
+  "Allow recently-used songs" checkbox for clarity (+1 app), and the
+  opt-in "Order for a natural flow" sequencing feature after a live A/B
+  diagnosis (+7: 2 generator, 5 app) — see their
   entries above) independent of all of the above. **Every module in
   the pipeline is now
   live-verified against real Spotify + Claude accounts.**
