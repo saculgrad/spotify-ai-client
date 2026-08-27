@@ -102,6 +102,12 @@ class GenerationRequest:
     # playlist — this isn't cosmetic. Opt-in (defaults off) since it's only
     # been validated on two live prompts so far, not battle-tested broadly
     # the way avoid_obvious now has been.
+    # Real-usage follow-up (2026-08-27): a live 35-track Motown run reviewed
+    # by the owner had a genuine flow win (closed on "My Girl," a strong,
+    # deliberate closer) but also a real flaw the original wording didn't
+    # guard against — a 6-track stretch clustered almost entirely around
+    # just two artists (3 Marvin Gaye + 2 Jr. Walker in a row). Added an
+    # explicit "spread out the same artist" instruction in response.
     sequence_for_flow: bool = False
     artist_diversity_cap: Optional[int] = None
     house_taste: list[str] = field(default_factory=list)   # "Artist - Title" lines
@@ -213,7 +219,11 @@ def _build_user_prompt(request: GenerationRequest, overgenerated_count: int) -> 
             "energy levels back to back without reason, avoid jarring "
             "era/genre whiplash between consecutive tracks unless the vibe "
             "specifically calls for eclecticism, and end on a track that "
-            "feels like a good closer if the vibe suggests one."
+            "feels like a good closer if the vibe suggests one. Also spread "
+            "out tracks by the same artist across the set rather than "
+            "clustering them — avoid stretches of consecutive or "
+            "near-consecutive tracks by the same artist, even if that means "
+            "interleaving with other artists more than you otherwise would."
         )
     if request.artist_diversity_cap:
         lines.append(

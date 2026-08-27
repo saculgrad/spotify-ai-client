@@ -310,14 +310,27 @@ API and returns `{title, artist}` candidates ready for `resolver.py`.
     flow *from* where the existing playlist left off. Would need feeding
     the target's tail end into the prompt to fix — not done, flagged for
     later.
+  - **Real-usage refinement (2026-08-27).** First live use after shipping:
+    a 35-track "upbeat Motown classics" playlist, reviewed track-by-track
+    by the owner. Genuine win — closed on The Temptations' "My Girl," a
+    strong, clearly deliberate closer, exactly what the instruction asked
+    for. But a real flaw the original wording never guarded against: a
+    6-track stretch clustered around just two artists (3 Marvin Gaye +
+    2 Jr. Walker & The All Stars back-to-back-ish), which reads as
+    monotonous in an actual party set even though nothing about "energy"
+    or "genre whiplash" was technically violated. Added an explicit
+    "spread out tracks by the same artist... avoid stretches of
+    consecutive or near-consecutive tracks by the same artist" clause.
+    Not yet re-validated live — the owner is testing this revision with a
+    different prompt next.
 - **Tested (mock Anthropic client, no API key needed):** happy path,
   correct over-generation count sent in the prompt, blocklist-by-artist,
   blocklist-by-track-title, malformed-row dropping, retry-then-succeed on
   refusal/truncation/malformed-JSON, raising after all retries are
   exhausted, the two `avoid_obvious` wording tests, `previously_rejected`
   reaching the prompt (present when populated, omitted when empty), and
-  `sequence_for_flow` reaching the prompt when requested / omitted by
-  default. 15/15 pass.
+  `sequence_for_flow` reaching the prompt when requested (including the
+  same-artist-spacing clause) / omitted by default. 15/15 pass.
 - **Live-verified against the real Claude API** multiple times since this
   file first said "not tested yet" — the initial live run (see "Live API
   verification" below), the `avoid_obvious` A/B diagnostic, and the

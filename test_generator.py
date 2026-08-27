@@ -189,6 +189,7 @@ def test_sequence_for_flow_reaches_the_prompt_when_requested():
     sent_prompt = client.messages.calls[0]["messages"][0]["content"]
     assert "actual listening sequence" in sent_prompt
     assert "good closer" in sent_prompt
+    assert "spread out tracks by the same artist" in sent_prompt
 
 
 def test_sequence_for_flow_omitted_by_default():
