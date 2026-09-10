@@ -159,6 +159,33 @@ API and returns `{title, artist}` candidates ready for `resolver.py`.
   that matches `resolver.py`'s `VARIANT_PENALTIES` keys (live, remix,
   instrumental, cover, karaoke, tribute, sped up, slowed, nightcore,
   8-bit) — pass this straight into `resolve_tracklist(wanted_variants=...)`.
+- **`max_tokens` now scales with request size (2026-09-10) — a real,
+  live-confirmed bug fix, not preventative.** The owner reported an error
+  generating a 100-track playlist. Reproduced directly against the real
+  Claude API before touching any code: `track_count=100` → 140
+  overgenerated candidates → `generate_candidates()` raised `RuntimeError`,
+  every one of its 3 retries failing with `stop_reason == "max_tokens"`.
+  Root cause: the old flat `MAX_TOKENS = 4096` was sized (per its own
+  comment) for "a few dozen rows" and never revisited even though
+  `app.py`'s own `MAX_TRACK_COUNT = 100` explicitly allows requests this
+  large — so this wasn't a flaky failure, it was a **guaranteed** failure
+  for any request landing near the app's own advertised maximum. Fixed by
+  live-measuring real output-token usage across several sizes (10/30/60/100
+  requested tracks) rather than guessing: usage settles at ~40 tokens per
+  candidate row at scale (39.5 measured at both 60 and 100 tracks; a bit
+  higher for very small batches due to fixed JSON/schema overhead). New
+  `_max_tokens_for(overgenerated_count)` scales the budget from that
+  measurement (60 tokens/row estimate — padded above the ~40 observed for
+  longer artist/title/reason text and non-English names — plus a 200-token
+  fixed overhead), with `MAX_TOKENS` kept as a floor (so small-request
+  behavior is provably unchanged) and a generous `MAX_TOKENS_CEILING`
+  sanity cap. **Confirmed fixed live, not just by the new offline tests:**
+  re-ran the exact `track_count=100` request that raised `RuntimeError`
+  before the fix — now succeeds cleanly (136 candidates generated).
+  **Tested (offline):** the floor for small requests, scaling up for large
+  ones, the ceiling cap, and — the actual regression test — that a
+  `track_count=100` request sends a `max_tokens` value reflecting 140
+  overgenerated candidates rather than the old flat 4096. 5 new tests.
 - **Blocklist is enforced in code, not just prompted** — `_apply_blocklist()`
   substring-matches (via `resolver.normalize()`) every candidate's title and
   artist against the blocklist after generation, so a banned artist/track
@@ -1258,10 +1285,10 @@ account — there's no more "buildable without credentials" backlog.
   developer watching the server log can see these failures next time,
   without changing the user-facing behavior (still degrades gracefully,
   never blocks the page).
-- All ten modules pass their full mock/unit test suites (39 resolver + 15
+- All ten modules pass their full mock/unit test suites (39 resolver + 20
   generator + 41 curation + 40 review + 39 spotify_client + 24 modes + 10
   logging_utils + 6 venue_config + 8 pipeline + 24 session_store + 110 app
-  = **356 tests**, up from 269 after eleven post-live-verification passes:
+  = **361 tests**, up from 269 after twelve post-live-verification passes:
   `resolve_tracklist()` parallelized (+5), the review-page scroll-anchor
   fix (+4), the cancel-review feature (+8), the small-bug/papercut audit
   fixes (+16), the recently-used-bypass/drop-reason-logging/avoid_obvious
@@ -1273,9 +1300,11 @@ account — there's no more "buildable without credentials" backlog.
   follow-up feature (+31: 8 review, 2 generator, 21 app — including a
   coverage-verification pass that found and closed 2 real gaps, one of
   them pre-existing in the original `/generate` route), relabeling the
-  "Allow recently-used songs" checkbox for clarity (+1 app), and the
-  opt-in "Order for a natural flow" sequencing feature after a live A/B
-  diagnosis (+7: 2 generator, 5 app) — see their
+  "Allow recently-used songs" checkbox for clarity (+1 app), the opt-in
+  "Order for a natural flow" sequencing feature after a live A/B diagnosis
+  (+7: 2 generator, 5 app), and fixing a live-confirmed `max_tokens`
+  truncation bug that guaranteed failure near `track_count=100` (+5
+  generator) — see their
   entries above) independent of all of the above. **Every module in
   the pipeline is now
   live-verified against real Spotify + Claude accounts.**

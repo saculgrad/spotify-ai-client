@@ -64,8 +64,33 @@ MODEL = "claude-opus-4-8"     # project spec notes a cheaper model works fine fo
                                # to claude-haiku-4-5 here if cost matters more than
                                # quality; defaulting to the strongest model for now.
 OVERGENERATION_FACTOR = 1.4   # ask for this many times the target count
-MAX_TOKENS = 4096             # plenty for a few dozen {title, artist, reason} rows
+# MAX_TOKENS below is a FLOOR for small requests, not a fixed budget — see
+# _max_tokens_for(). A flat 4096 silently broke every request near
+# track_count=100: live-measured 2026-09-10 against the real Claude API,
+# output tokens scale at ~40/candidate row at scale (39.5 for both 60 and
+# 100 requested tracks; a bit higher, ~48, for very small batches due to
+# fixed JSON/schema overhead) — so 100 tracks -> 140 overgenerated
+# candidates -> ~5536 real output tokens, already past the old flat 4096,
+# guaranteeing max_tokens truncation on every one of the 3 retries
+# (confirmed live: reproducing track_count=100 raised RuntimeError,
+# "truncated at max_tokens on attempt 3").
+MAX_TOKENS = 4096
+ESTIMATED_TOKENS_PER_CANDIDATE = 60   # ~40 measured; padded for longer artist/title/
+                                       # reason text and non-English names
+FIXED_OUTPUT_OVERHEAD_TOKENS = 200    # wanted_variants array + JSON scaffolding
+MAX_TOKENS_CEILING = 16000            # sanity cap — track_count is itself capped at
+                                       # 100 by app.py, which this formula would never
+                                       # come close to needing this much for
 MAX_ATTEMPTS = 3              # 1 initial try + 2 retries on refusal/truncation/malformed JSON
+
+
+def _max_tokens_for(overgenerated_count: int) -> int:
+    """Scale the output token budget with how many candidates were actually
+    asked for, instead of one flat number that only worked for small
+    requests. MAX_TOKENS remains the floor so small-request behavior is
+    unchanged from before this existed."""
+    estimated = overgenerated_count * ESTIMATED_TOKENS_PER_CANDIDATE + FIXED_OUTPUT_OVERHEAD_TOKENS
+    return min(max(MAX_TOKENS, estimated), MAX_TOKENS_CEILING)
 
 # Variant words the resolver's scoring knows how to handle (resolver.py
 # VARIANT_PENALTIES). Surfaced to the model so it emits wanted_variants using
@@ -312,12 +337,13 @@ def generate_candidates(client, request: GenerationRequest) -> GenerationResult:
     )
     system = _build_system_prompt()
     user = _build_user_prompt(request, overgenerated_count)
+    max_tokens = _max_tokens_for(overgenerated_count)
 
     last_error = "unknown error"
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = client.messages.create(
             model=request.model,
-            max_tokens=MAX_TOKENS,
+            max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
             output_config={"format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA}},

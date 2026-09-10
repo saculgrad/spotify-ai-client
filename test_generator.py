@@ -18,8 +18,11 @@ import pytest
 
 from generator import (
     MAX_ATTEMPTS,
+    MAX_TOKENS,
+    MAX_TOKENS_CEILING,
     GenerationRequest,
     OVERGENERATION_FACTOR,
+    _max_tokens_for,
     generate_candidates,
 )
 
@@ -104,6 +107,60 @@ def test_requests_overgenerated_count_in_prompt():
     expected_count = math.ceil(20 * OVERGENERATION_FACTOR)
     sent_prompt = client.messages.calls[0]["messages"][0]["content"]
     assert f"Generate exactly {expected_count} candidate tracks" in sent_prompt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# max_tokens scaling — regression coverage for a real live bug: a flat
+# MAX_TOKENS=4096 reliably truncated every attempt (all 3 retries) once
+# track_count got near app.py's own allowed maximum of 100, since 100
+# tracks -> 140 overgenerated candidates -> ~5536 real measured output
+# tokens (live-measured 2026-09-10), already past the old flat budget.
+# Confirmed live before fixing: reproducing track_count=100 raised
+# RuntimeError("...truncated at max_tokens on attempt 3").
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_max_tokens_for_small_count_uses_the_floor():
+    assert _max_tokens_for(14) == MAX_TOKENS
+
+
+def test_max_tokens_for_scales_up_with_candidate_count():
+    small = _max_tokens_for(14)
+    large = _max_tokens_for(140)
+    assert large > small
+    assert large > MAX_TOKENS
+
+
+def test_max_tokens_for_never_exceeds_the_ceiling():
+    assert _max_tokens_for(10_000) == MAX_TOKENS_CEILING
+
+
+def test_generate_candidates_sends_scaled_max_tokens_for_a_large_request():
+    """The actual regression: track_count=100 must send a max_tokens value
+    that reflects 140 overgenerated candidates, not the old flat 4096 that
+    reliably truncated every retry at this size."""
+    import math
+
+    text = payload_text([cand("Song", "Artist")])
+    client = FakeClient([FakeResponse(text=text)])
+    req = GenerationRequest(vibe_prompt="anything", track_count=100)
+
+    generate_candidates(client, req)
+
+    overgenerated_count = math.ceil(100 * OVERGENERATION_FACTOR)
+    sent_max_tokens = client.messages.calls[0]["max_tokens"]
+    assert sent_max_tokens == _max_tokens_for(overgenerated_count)
+    assert sent_max_tokens > MAX_TOKENS
+
+
+def test_generate_candidates_sends_floor_max_tokens_for_a_small_request():
+    text = payload_text([cand("Song", "Artist")])
+    client = FakeClient([FakeResponse(text=text)])
+    req = GenerationRequest(vibe_prompt="anything", track_count=2)
+
+    generate_candidates(client, req)
+
+    sent_max_tokens = client.messages.calls[0]["max_tokens"]
+    assert sent_max_tokens == MAX_TOKENS
 
 
 def test_avoid_obvious_prompt_explicitly_overrides_party_vibe_assumption():
