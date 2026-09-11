@@ -490,6 +490,67 @@ The track resolver — the quality-critical piece. Given LLM candidates
   test actually landed in that dead zone, so there's no direct evidence
   yet that it's a meaningful contributor. Left as a documented, ready-to-
   apply option rather than changed speculatively.
+- **Rate-limit handling added (2026-09-11)** — the resolver-side half of
+  the multi-hour-hang fix documented in full in `spotify_client.py`'s
+  `get_client()` entry; read that first for the live incident and root
+  cause. Once `get_client()`'s fix makes a 429 surface quickly instead of
+  hanging, this module still needed to (a) report it as a clear,
+  distinct reason instead of the generic `"no_search_results"` a caught-
+  and-swallowed exception would otherwise produce, and (b) stop the batch
+  from continuing to hammer an API that just said "come back later" —
+  directly serving CLAUDE.md's own stated "keep it low-volume... a
+  firehose of unattended writes risks the app's API access being
+  throttled or revoked" design philosophy, which repeatedly hitting
+  Spotify *while already rate-limited* works directly against.
+  - New `SpotifyRateLimitedError`, raised by `_search()` when it detects
+    `http_status == 429` on whatever spotipy raises (via a small
+    `_rate_limit_error_or_none()` helper — spotipy has no dedicated
+    exception subclass per status code, `http_status` is the only
+    reliable signal). `resolve_track()` catches it and returns
+    `reason="rate_limited"` (with a `"(retry after Xs)"` suffix when
+    Spotify's response included one), without attempting the loose
+    fallback query — that would just fail identically.
+  - `resolve_tracklist()` now creates one shared `threading.Event()` per
+    batch and threads it through every `resolve_track()` call as
+    `stop_flag`. Any worker that hits a 429 sets it; any call that starts
+    with it already set skips the network call entirely and returns
+    `rate_limited` immediately — so once the app knows it's rate-limited,
+    it stops trying to prove that again 100+ more times.
+  - **A real bug the tests caught, not just confirmed passing:** the
+    first pass added the `stop_flag` parameter to `resolve_track()` and
+    fully documented the early-exit behavior in `resolve_tracklist()`'s
+    own docstring — but never actually created the `threading.Event()`
+    or passed it into the `partial(...)` used to build the pool's worker
+    function. The feature was completely inert; every call silently used
+    the parameter's `None` default. A dedicated test asserting the call
+    count stays well under one-call-per-candidate caught this
+    immediately (first run: exactly 50 calls for 50 candidates, no
+    reduction at all) — worth keeping as a cautionary example of writing
+    a test for the actual claimed behavior, not just "does it crash."
+  - **A second, subtler test bug along the way:** the first version of
+    that same test used a mock client that fails *instantly* (no
+    simulated network delay), which gives the 8-worker thread pool no
+    genuine wall-clock opportunity for one worker's flag-set to be
+    observed by the others before they've already started their own
+    doomed call — so even with the wiring bug above fixed, an instant
+    mock would still show close to one call per candidate, for reasons
+    that have nothing to do with whether the early-exit logic is correct.
+    Fixed by giving the fake client a small real `time.sleep()` per call,
+    mirroring this file's existing
+    `test_dedupe_keeps_first_candidate_by_input_order_even_when_it_resolves_slowest`
+    pattern of using genuine timing to force real interleaving instead of
+    asserting behavior a trivial mock can't actually exercise.
+  - **Tested:** the exception class itself (with/without a retry-after
+    value), the clear reason surfacing on a 429 (with and without a
+    retry-after suffix), no loose-fallback attempt after a rate limit,
+    the stop_flag being set on a 429 and honored (network call skipped
+    entirely) when already set, the batch-level early-exit actually
+    bounding the call count well under one-per-candidate across 50
+    candidates, and the `dropped_by_reason` summary bucketing
+    `"rate_limited"` correctly (stripping the parenthetical retry-after
+    detail, consistent with every other bucketed reason in this
+    codebase). 9 new tests, 48/48 pass (was 39 — see the rollup at the
+    bottom of this file for the full running total).
 
 ## Tested / not tested
 - **Tested (mock Spotify client, adversarial cases):** skips karaoke/cover sitting
@@ -590,6 +651,52 @@ search-shape churn never land in the same diff — see "Module map" above.
   account — there isn't one set up yet. Every read function checks
   **both** `entry["item"]` and `entry["track"]` defensively so it keeps
   working whichever shape turns out to be live.
+- **`get_client()` disables spotipy's automatic HTTP retries entirely
+  (2026-09-11) — a real, live-diagnosed multi-hour hang, not a
+  preventative change.** The owner reported the app "stuck loading" for
+  many minutes on a real generate call. Root-caused via direct live
+  reproduction (a curl POST to `/generate`, bypassing the browser
+  entirely, that itself never returned even after a 4-minute client-side
+  timeout) plus a live, isolated `sp.search()` call that printed spotipy's
+  own warning — **"Your application has reached a rate/request limit.
+  Retry will occur after: 11981 s"** (~3.3 hours) — and then simply never
+  returned. Root cause: spotipy's default retry config includes 429
+  among its auto-retried status codes, and urllib3 (which spotipy uses
+  under the hood) respects a `Retry-After` header by *sleeping* for that
+  duration before retrying, up to spotipy's default 3 retries — from the
+  app's perspective this is indistinguishable from an indefinite hang: no
+  crash, no exception, no timeout, nothing to point at.
+  **A first fix attempt was tried, live-verified, and found insufficient**
+  — worth recording *why*, not just that it didn't work: excluding 429
+  from spotipy's `status_forcelist` looked like the obvious fix (429 is
+  the specific status code we want to stop retrying), but urllib3's
+  `Retry.is_retry()` treats *any* response carrying a `Retry-After`
+  header as independently retry-eligible, regardless of
+  `status_forcelist` membership — and a 429 always carries that header
+  by definition. Re-tested live with that first fix in place: `sp.search()`
+  against the still-rate-limited account hung again. **The fix that
+  actually works, also live-verified:** `retries=0, status_retries=0`,
+  disabling spotipy's automatic retry behavior altogether — this
+  unconditionally prevents urllib3 from ever entering its retry-sleep
+  path, for any status code or header combination. Confirmed live: the
+  identical rate-limited `sp.search()` call now fails in **0.21 seconds**
+  with a normal `SpotifyException` instead of hanging. Trade-off,
+  explicit: an ordinary transient 5xx blip that spotipy would previously
+  have quietly retried now fails on the first attempt — accepted as
+  correct for this app, since a dropped candidate just doesn't show up
+  for review (nothing crashes; see `resolver.py`'s entry for the
+  per-candidate handling), and the alternative is literally the mechanism
+  that caused the multi-hour hang.
+  **A stuck-process cleanup discovery, worth remembering:** while
+  diagnosing this live, `sample`-based process inspection found the
+  Flask dev server process running FAR more OS threads than
+  `resolve_tracklist()`'s single `MAX_RESOLVER_WORKERS=8` pool should
+  ever produce — traced to the *original* stuck request, still alive on
+  pre-fix code, slowly accumulating a fresh stuck 8-worker batch for
+  every candidate that (very slowly) discovered the same rate limit on
+  its own. Restarting the dev server after landing the fix was
+  necessary specifically to clear that accumulated state, not just to
+  pick up the new code.
 - **Tested (fully offline — `_get`/`_post` mocked, no network):** env-var
   validation, localhost rejection, default vs. custom cache path,
   create_playlist payload shape, add-batching at the exact 100/101/200
@@ -597,10 +704,13 @@ search-shape churn never land in the same diff — see "Module map" above.
   across full/partial pages, defensive handling of null tracks/missing
   fields/duplicate ids in playlist entries, `list_playlists()` pagination
   and malformed-entry skipping, `get_house_taste_sample()`'s
-  `limit_per_playlist`/`max_total` caps and multi-playlist combination.
-  38/38 pass. **Genuinely not testable without live credentials:** the
-  actual OAuth login flow and whether the endpoint/field-name assumptions
-  above are still correct.
+  `limit_per_playlist`/`max_total` caps and multi-playlist combination,
+  and `get_client()` passing `retries=0`/`status_retries=0` plus an
+  explicitly-provided `auth_manager` straight through to `spotipy.Spotify()`
+  (via a fake swapped in for the `spotipy.Spotify` class itself — no real
+  credentials needed). 40/40 pass. **Genuinely not testable without live
+  credentials:** the actual OAuth login flow and whether the
+  endpoint/field-name assumptions above are still correct.
 
 ## What's built: `modes.py`
 Day-part "modes" (brunch/dinner/late) and target-playlist resolution —
@@ -1285,10 +1395,10 @@ account — there's no more "buildable without credentials" backlog.
   developer watching the server log can see these failures next time,
   without changing the user-facing behavior (still degrades gracefully,
   never blocks the page).
-- All ten modules pass their full mock/unit test suites (39 resolver + 20
-  generator + 41 curation + 40 review + 39 spotify_client + 24 modes + 10
+- All ten modules pass their full mock/unit test suites (48 resolver + 20
+  generator + 41 curation + 40 review + 41 spotify_client + 24 modes + 10
   logging_utils + 6 venue_config + 8 pipeline + 24 session_store + 110 app
-  = **361 tests**, up from 269 after twelve post-live-verification passes:
+  = **372 tests**, up from 269 after thirteen post-live-verification passes:
   `resolve_tracklist()` parallelized (+5), the review-page scroll-anchor
   fix (+4), the cancel-review feature (+8), the small-bug/papercut audit
   fixes (+16), the recently-used-bypass/drop-reason-logging/avoid_obvious
@@ -1302,9 +1412,13 @@ account — there's no more "buildable without credentials" backlog.
   them pre-existing in the original `/generate` route), relabeling the
   "Allow recently-used songs" checkbox for clarity (+1 app), the opt-in
   "Order for a natural flow" sequencing feature after a live A/B diagnosis
-  (+7: 2 generator, 5 app), and fixing a live-confirmed `max_tokens`
+  (+7: 2 generator, 5 app), fixing a live-confirmed `max_tokens`
   truncation bug that guaranteed failure near `track_count=100` (+5
-  generator) — see their
+  generator), and fixing a live-confirmed multi-hour hang on a real
+  Spotify rate limit (+11: 9 resolver, 2 spotify_client — see
+  `spotify_client.py`'s and `resolver.py`'s entries for the full incident,
+  including a wrong first fix attempt and a real wiring bug the new tests
+  themselves caught) — see their
   entries above) independent of all of the above. **Every module in
   the pipeline is now
   live-verified against real Spotify + Claude accounts.**

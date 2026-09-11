@@ -19,11 +19,13 @@ Run:
 
 from __future__ import annotations
 
+import threading
 import time
 
 from resolver import (
     ACCEPT_THRESHOLD,
     Candidate,
+    SpotifyRateLimitedError,
     best_artist_sim,
     resolve_track,
     resolve_tracklist,
@@ -63,6 +65,45 @@ class MockSpotify:
     def search(self, q, type="track", limit=10, market=None):
         self.calls += 1
         return {"tracks": {"items": self.items}}
+
+
+class FakeSpotifyRateLimitException(Exception):
+    """Mimics the real shape of spotipy.exceptions.SpotifyException for a
+    429 response — resolver.py's _rate_limit_error_or_none() only looks at
+    `.http_status` and `.headers`, so this fake only needs those, not a
+    real dependency on spotipy's exception classes."""
+
+    def __init__(self, retry_after="11981"):
+        self.http_status = 429
+        self.headers = {"Retry-After": retry_after} if retry_after else {}
+        super().__init__("rate limited (fake)")
+
+
+class RateLimitedMockSpotify:
+    """Every .search() call raises a fake 429 — simulates the real,
+    live-diagnosed 2026-09-11 scenario (see spotify_client.get_client()'s
+    docstring) where Spotify rate-limits this app's credentials.
+
+    A small real delay (`call_delay`) is deliberately included: an
+    instant-failing mock gives the resolver's 8 worker threads no genuine
+    wall-clock opportunity to observe another thread's stop_flag before
+    they've already started their own doomed call — every real network
+    call has actual latency, which is exactly what gives the early-exit
+    optimization room to matter. Mirrors this file's existing
+    `test_dedupe_keeps_first_candidate_by_input_order_even_when_it_resolves_slowest`
+    pattern of using a real `time.sleep()` to force genuine interleaving
+    instead of asserting behavior a trivial mock can't actually exercise."""
+
+    def __init__(self, retry_after="11981", call_delay=0.01):
+        self.retry_after = retry_after
+        self.call_delay = call_delay
+        self.calls = 0
+
+    def search(self, q, type="track", limit=10, market=None):
+        self.calls += 1
+        if self.call_delay:
+            time.sleep(self.call_delay)
+        raise FakeSpotifyRateLimitException(self.retry_after)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -741,6 +782,115 @@ def test_resolve_tracklist_skips_prewarm_when_no_auth_manager():
     result = resolve_tracklist(sp, [Candidate("Ain't No Sunshine", "Bill Withers")], market="US")
 
     assert result["summary"]["accepted"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate-limit handling — live-diagnosed 2026-09-11 (see spotify_client.py's
+# get_client() docstring for the full incident). A real Spotify 429 used to
+# make sp.search() block for however long Spotify's Retry-After header said
+# (a real one asked for ~3.3 hours) — from the app's perspective this looked
+# exactly like an indefinite hang, not a fast, diagnosable failure. These
+# tests cover the resolver-side half of the fix: once a 429 DOES surface
+# quickly (spotify_client.py's job), resolve_track()/resolve_tracklist()
+# must produce a clear "rate_limited" reason and stop hitting Spotify
+# further, rather than let every other candidate independently discover
+# and re-report the same rate limit one doomed request at a time.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_spotify_rate_limited_error_carries_retry_after():
+    e = SpotifyRateLimitedError(retry_after="300")
+    assert e.retry_after == "300"
+    assert "300" in str(e)
+
+
+def test_spotify_rate_limited_error_without_retry_after():
+    e = SpotifyRateLimitedError()
+    assert e.retry_after is None
+    assert "retry after" not in str(e)
+
+
+def test_resolve_track_returns_clear_rate_limited_reason_on_429():
+    sp = RateLimitedMockSpotify(retry_after="120")
+    cand = Candidate("Last Nite", "The Strokes")
+
+    r = resolve_track(sp, cand, market="US")
+
+    assert not r.accepted
+    assert r.reason == "rate_limited (retry after 120s)"
+
+
+def test_resolve_track_rate_limited_reason_omits_suffix_when_no_retry_after_header():
+    sp = RateLimitedMockSpotify(retry_after=None)
+    cand = Candidate("Last Nite", "The Strokes")
+
+    r = resolve_track(sp, cand, market="US")
+
+    assert r.reason == "rate_limited"
+
+
+def test_resolve_track_does_not_attempt_loose_fallback_after_rate_limit():
+    """The strict query alone hitting a 429 should stop resolve_track() from
+    trying the loose fallback too — that second call would just fail the
+    same way and adds nothing."""
+    sp = RateLimitedMockSpotify()
+    cand = Candidate("Last Nite", "The Strokes")
+
+    resolve_track(sp, cand, market="US")
+
+    assert sp.calls == 1
+
+
+def test_resolve_track_sets_stop_flag_on_rate_limit():
+    sp = RateLimitedMockSpotify()
+    flag = threading.Event()
+    cand = Candidate("Last Nite", "The Strokes")
+
+    resolve_track(sp, cand, market="US", stop_flag=flag)
+
+    assert flag.is_set()
+
+
+def test_resolve_track_skips_network_call_when_stop_flag_already_set():
+    sp = RateLimitedMockSpotify()
+    flag = threading.Event()
+    flag.set()
+    cand = Candidate("Last Nite", "The Strokes")
+
+    r = resolve_track(sp, cand, market="US", stop_flag=flag)
+
+    assert r.reason == "rate_limited"
+    assert sp.calls == 0   # never actually hit Spotify — the flag alone was enough
+
+
+def test_resolve_tracklist_stops_hitting_spotify_after_first_rate_limit():
+    """The real point of the fix: once ANY candidate confirms a rate limit,
+    the rest of a (possibly 100+ candidate) batch must not each
+    independently make their own doomed request. With MAX_RESOLVER_WORKERS=8
+    workers pulling from a queue of many candidates, some short burst of
+    calls before the flag propagates is expected and fine — what matters is
+    that it's nowhere near one full call per candidate."""
+    sp = RateLimitedMockSpotify()
+    candidates = [Candidate(f"Song {i}", f"Artist {i}") for i in range(50)]
+
+    result = resolve_tracklist(sp, candidates, market="US")
+
+    assert result["summary"]["accepted"] == 0
+    assert result["summary"]["dropped"] == 50
+    assert all(r.reason.startswith("rate_limited") for r in result["dropped"])
+    # Without the stop-flag short-circuit this would be up to 100 (2 queries
+    # per candidate x 50). A generous upper bound catches a real regression
+    # without being flaky about exactly how many workers raced ahead before
+    # the flag was set.
+    assert sp.calls < 50
+
+
+def test_resolve_tracklist_summary_buckets_rate_limited_reason():
+    sp = RateLimitedMockSpotify(retry_after="45")
+    candidates = [Candidate("Song A", "Artist A"), Candidate("Song B", "Artist B")]
+
+    result = resolve_tracklist(sp, candidates, market="US")
+
+    assert result["summary"]["dropped_by_reason"] == {"rate_limited": 2}
 
 
 if __name__ == "__main__":

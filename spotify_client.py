@@ -128,10 +128,47 @@ def build_auth_manager(cache_path: Optional[str] = None):
 def get_client(auth_manager=None):
     """Return an authenticated spotipy.Spotify client. First call opens a
     browser for the one-time OAuth consent screen; spotipy caches and
-    silently refreshes the token on subsequent calls via cache_path."""
+    silently refreshes the token on subsequent calls via cache_path.
+
+    **Live-diagnosed bug fix (2026-09-11) — automatic HTTP retries
+    disabled entirely.** spotipy's default retry config includes 429
+    (rate limited) among its auto-retried status codes, and urllib3's
+    Retry — which spotipy uses under the hood — will actually *sleep* for
+    however long a response's `Retry-After` header says before retrying.
+    A real rate-limit hit during heavy same-day testing asked for an
+    **~3.3 hour** retry delay; from the app's perspective this looked
+    exactly like an indefinite hang (no crash, no error, no timeout —
+    nothing to point at), not a fast, diagnosable failure.
+
+    **First fix attempt was wrong, corrected after live re-verification:**
+    excluding 429 from spotipy's `status_forcelist` alone does NOT stop
+    this. urllib3's `Retry.is_retry()` treats *any* response carrying a
+    `Retry-After` header as retry-eligible on its own, independent of
+    `status_forcelist` membership — and a 429 always carries that header
+    by definition. Confirmed live: with 429 excluded from
+    `status_forcelist`, a direct `sp.search()` call against a real
+    rate-limited account still hung and only ever printed spotipy's
+    "Your application has reached a rate/request limit..." warning,
+    never returning. The only reliable fix is disabling retries
+    altogether — `retries=0, status_retries=0` — so urllib3 never enters
+    its retry-sleep path for *any* status code or header combination. A
+    failed call now surfaces immediately as a `SpotifyException`, which
+    callers (see `resolver.py`'s `_search()`) already catch and handle
+    per-candidate without crashing the batch. This does mean an ordinary
+    transient 5xx blip that spotipy would previously have quietly retried
+    now fails on the first attempt instead — judged an acceptable
+    tradeoff: this is a human-reviewed tool (a dropped candidate just
+    doesn't show up for review, nothing crashes), and the alternative
+    (auto-retrying) is exactly the mechanism that caused a multi-hour
+    hang in the first place.
+    """
     import spotipy
 
-    return spotipy.Spotify(auth_manager=auth_manager or build_auth_manager())
+    return spotipy.Spotify(
+        auth_manager=auth_manager or build_auth_manager(),
+        retries=0,
+        status_retries=0,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

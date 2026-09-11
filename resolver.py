@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
@@ -188,6 +189,46 @@ class MatchResult:
     subscores: dict = field(default_factory=dict)
 
 
+class SpotifyRateLimitedError(Exception):
+    """Raised internally (by _search(), caught by resolve_track()) when
+    Spotify returns a 429. **Not** the same as spotipy's own
+    SpotifyException — this exists so the rate-limit case can be handled
+    distinctly from an ordinary search error, both for a clear per-candidate
+    reason (see resolve_track()) and so resolve_tracklist() can stop hitting
+    Spotify further once one worker hits this, instead of every other
+    candidate independently discovering the same rate limit one by one.
+
+    Live-diagnosed 2026-09-11 (see spotify_client.get_client()'s docstring
+    for the full story): without spotify_client.py's RETRY_STATUS_FORCELIST
+    fix, a 429 would never even reach this — spotipy/urllib3 would silently
+    sleep for however long Spotify's Retry-After header says (a real one
+    asked for ~3.3 hours) before ever raising anything. This class is the
+    second half of that fix: once a 429 DOES surface quickly, make sure the
+    app treats it as the distinct, actionable thing it is.
+    """
+
+    def __init__(self, retry_after: Optional[str] = None):
+        self.retry_after = retry_after
+        suffix = f" (retry after {retry_after}s)" if retry_after else ""
+        super().__init__(f"Spotify rate limit (429) hit{suffix}")
+
+
+def _rate_limit_error_or_none(e: Exception) -> Optional[SpotifyRateLimitedError]:
+    """If `e` is (or wraps) a 429 from spotipy, return a SpotifyRateLimitedError
+    carrying the Retry-After value; otherwise None. Kept as a standalone
+    check (rather than inline isinstance/attribute checks scattered around)
+    since spotipy raises a plain SpotifyException for every HTTP error, not
+    a dedicated exception subclass per status code — http_status is the
+    only reliable signal."""
+    if getattr(e, "http_status", None) == 429:
+        retry_after = None
+        headers = getattr(e, "headers", None)
+        if headers:
+            retry_after = headers.get("Retry-After")
+        return SpotifyRateLimitedError(retry_after)
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scoring
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,13 +285,17 @@ def _search(sp, query: str, market: str) -> list[dict]:
         res = sp.search(q=query, type="track", limit=SEARCH_LIMIT, market=market)
         return res.get("tracks", {}).get("items", []) or []
     except Exception as e:                      # noqa: BLE001 (spike: surface, don't crash batch)
+        rate_limit_error = _rate_limit_error_or_none(e)
+        if rate_limit_error is not None:
+            raise rate_limit_error from e
         print(f"  ! search error for {query!r}: {e}")
         return []
 
 
 def resolve_track(sp, cand: Candidate, market: str = "US",
                   wanted_variants: Optional[set[str]] = None,
-                  allow_explicit: bool = True) -> MatchResult:
+                  allow_explicit: bool = True,
+                  stop_flag: Optional[threading.Event] = None) -> MatchResult:
     """Resolve ONE candidate to the best real track, or drop it with a reason.
 
     allow_explicit=False makes explicit a gate, not just a downstream filter
@@ -263,13 +308,30 @@ def resolve_track(sp, cand: Candidate, market: str = "US",
     entirely instead of substituting the clean version. explicit=None
     (Spotify didn't report the flag) is never gated — same "unknown isn't
     guilty" policy as curation.filter_explicit's default.
+
+    `stop_flag` (optional, set by resolve_tracklist()'s thread pool): if
+    already set when this call starts, skip the network call entirely and
+    drop the candidate as rate_limited immediately — once ANY worker in the
+    batch has confirmed Spotify is rate-limiting this app, there's no
+    reason to let every other worker independently discover the same thing
+    one doomed request at a time. If a 429 shows up mid-call, this sets the
+    flag itself so the *next* candidates skip too.
     """
     wanted_variants = wanted_variants or set()
+
+    if stop_flag is not None and stop_flag.is_set():
+        return MatchResult(cand, accepted=False, reason="rate_limited")
 
     # strict field-filtered query first; loose fallback if it returns nothing
     strict = f'track:"{cand.title}" artist:"{cand.artist}"'
     loose = f"{cand.title} {cand.artist}"
-    items = _search(sp, strict, market) or _search(sp, loose, market)
+    try:
+        items = _search(sp, strict, market) or _search(sp, loose, market)
+    except SpotifyRateLimitedError as e:
+        if stop_flag is not None:
+            stop_flag.set()
+        suffix = f" (retry after {e.retry_after}s)" if e.retry_after else ""
+        return MatchResult(cand, accepted=False, reason=f"rate_limited{suffix}")
 
     if not items:
         return MatchResult(cand, accepted=False, reason="no_search_results")
@@ -344,6 +406,16 @@ def resolve_tracklist(sp, candidates: list[Candidate], market: str = "US",
     Forcing a single check up front means the cache is fresh before any
     thread touches it — access tokens last ~1hr, this batch takes seconds —
     so that race never has a chance to trigger in practice.
+
+    A shared `threading.Event` is also passed to every resolve_track() call
+    so that once ANY worker hits a Spotify 429, the rest of the (possibly
+    100+) remaining candidates short-circuit to "rate_limited" instead of
+    each independently making — and failing — their own doomed request.
+    This matters beyond just saving time: CLAUDE.md's stated design
+    philosophy is "keep it low-volume... a firehose of unattended writes
+    risks the app's API access being throttled or revoked," and continuing
+    to hammer an API that just told us to back off works directly against
+    that, on top of being pointless once we already know the answer.
     """
     accepted: list[MatchResult] = []
     dropped: list[MatchResult] = []
@@ -365,8 +437,10 @@ def resolve_tracklist(sp, candidates: list[Candidate], market: str = "US",
             print(f"  ! token pre-warm failed, continuing anyway: {e}")  # real auth failure
             # will still surface per-candidate below via _search()'s own error handling.
 
+    rate_limit_flag = threading.Event()
     resolve_one = partial(resolve_track, sp, market=market,
-                           wanted_variants=wanted_variants, allow_explicit=allow_explicit)
+                           wanted_variants=wanted_variants, allow_explicit=allow_explicit,
+                           stop_flag=rate_limit_flag)
     with ThreadPoolExecutor(max_workers=min(MAX_RESOLVER_WORKERS, len(candidates))) as executor:
         results = list(executor.map(resolve_one, candidates))
 

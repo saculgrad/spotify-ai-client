@@ -25,6 +25,7 @@ from spotify_client import (
     add_tracks_to_playlist,
     build_auth_manager,
     create_playlist,
+    get_client,
     get_house_taste_sample,
     get_playlist_track_ids,
     list_playlists,
@@ -128,6 +129,49 @@ def test_build_auth_manager_explicit_cache_path_overrides_default(monkeypatch, t
     auth = build_auth_manager(cache_path=custom)
 
     assert auth.cache_handler.cache_path == custom
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_client — live-diagnosed 2026-09-11 regression coverage: a real
+# Spotify 429 with a multi-hour Retry-After header made spotipy silently
+# block for that entire duration (urllib3 respects the header for ANY
+# retry-eligible response, not just ones in status_forcelist — a first fix
+# attempt that only excluded 429 from status_forcelist was verified live
+# to NOT be enough). The only reliable fix is disabling spotipy's
+# automatic retries entirely. This doesn't need real credentials — it only
+# checks what get_client() passes to spotipy.Spotify(), via a fake class
+# swapped in for spotipy.Spotify itself.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FakeSpotipyClientClass:
+    """Stands in for spotipy.Spotify — records the kwargs it was
+    constructed with instead of doing anything real."""
+    last_kwargs = None
+
+    def __init__(self, **kwargs):
+        FakeSpotipyClientClass.last_kwargs = kwargs
+
+
+def test_get_client_disables_automatic_retries(monkeypatch):
+    import spotipy
+    monkeypatch.setattr(spotipy, "Spotify", FakeSpotipyClientClass)
+    monkeypatch.setenv("SPOTIPY_CLIENT_ID", "id")
+    monkeypatch.setenv("SPOTIPY_CLIENT_SECRET", "secret")
+
+    get_client()
+
+    assert FakeSpotipyClientClass.last_kwargs["retries"] == 0
+    assert FakeSpotipyClientClass.last_kwargs["status_retries"] == 0
+
+
+def test_get_client_uses_provided_auth_manager_without_building_a_new_one(monkeypatch):
+    import spotipy
+    monkeypatch.setattr(spotipy, "Spotify", FakeSpotipyClientClass)
+    sentinel_auth_manager = object()
+
+    get_client(auth_manager=sentinel_auth_manager)
+
+    assert FakeSpotipyClientClass.last_kwargs["auth_manager"] is sentinel_auth_manager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
